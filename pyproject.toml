@@ -1,0 +1,18 @@
+[project]
+name = "docker-container-tools"
+version = "0.1.0"
+description = "Simple Python CLI tools for launching and managing Docker containers."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+docker-launch = "docker_launch:main"
+docker-manager = "docker_manager:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["docker_launch", "docker_manager"]
