@@ -69,6 +69,28 @@ uv run docker-launch mysql
 uv run docker-launch mongo
 ```
 
+Launch several containers in one command:
+
+```bash
+uv run docker-launch postgres redis nginx --network boxyard-net --create-network
+```
+
+That launches one container per preset:
+
+```text
+postgres  -> container name postgres
+redis     -> container name redis
+nginx     -> container name nginx
+```
+
+Use a name prefix when launching a group:
+
+```bash
+uv run docker-launch postgres redis nginx --name-prefix app --network boxyard-net
+```
+
+That creates containers named `app-postgres`, `app-redis`, and `app-nginx`.
+
 Attach containers to the same Docker network so they can talk to each other:
 
 ```bash

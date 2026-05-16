@@ -4,6 +4,7 @@ Launch common Docker containers by short name.
 
 Examples:
   python3 docker_launch sqlite
+  python3 docker_launch postgres redis nginx --network boxyard-net --create-network
   python3 docker_launch nginx --name web -p 8080:80
   python3 docker_launch postgres --name db -e POSTGRES_PASSWORD=secret
 """
@@ -85,8 +86,12 @@ def require_docker() -> None:
         sys.exit(127)
 
 
-def build_run_command(args: argparse.Namespace, preset: Preset) -> list[str]:
-    name = args.name or args.kind
+def build_run_command(
+    args: argparse.Namespace,
+    preset: Preset,
+    *,
+    name: str,
+) -> list[str]:
     command = ["docker", "run"]
 
     detach = preset.detach and not args.foreground
@@ -139,9 +144,10 @@ def list_presets() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Launch common Docker containers by short name.")
-    parser.add_argument("kind", nargs="?", help="Container kind, for example sqlite, nginx, redis, postgres")
+    parser.add_argument("kinds", nargs="*", help="Container kinds, for example sqlite nginx redis postgres")
     parser.add_argument("--list", action="store_true", help="Show available container presets")
     parser.add_argument("--name", help="Container name. Defaults to the selected kind.")
+    parser.add_argument("--name-prefix", help="Prefix names when launching multiple containers")
     parser.add_argument("--image", help="Override the Docker image for this launch")
     parser.add_argument("-p", "--port", action="append", default=[], help="Extra port mapping, for example 8080:80")
     parser.add_argument("-e", "--env", action="append", default=[], help="Extra environment variable, for example KEY=value")
@@ -154,37 +160,96 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def parse_args(parser: argparse.ArgumentParser) -> argparse.Namespace:
+    argv = sys.argv[1:]
+    if "--" in argv:
+        separator_index = argv.index("--")
+        args = parser.parse_args(argv[:separator_index])
+        args.container_command = argv[separator_index + 1 :]
+    else:
+        args = parser.parse_args(argv)
+        args.container_command = []
+    return args
+
+
+def validate_preset(parser: argparse.ArgumentParser, kind: str) -> Preset:
+    preset = PRESETS.get(kind)
+    if preset is None:
+        available = ", ".join(sorted(PRESETS))
+        parser.error(f"unknown container kind {kind!r}. Available: {available}")
+    return preset
+
+
+def container_name(args: argparse.Namespace, kind: str, seen: dict[str, int]) -> str:
+    if args.name:
+        return args.name
+
+    base_name = f"{args.name_prefix}-{kind}" if args.name_prefix else kind
+    seen[base_name] = seen.get(base_name, 0) + 1
+    if seen[base_name] == 1:
+        return base_name
+    return f"{base_name}-{seen[base_name]}"
+
+
+def validate_multi_launch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if len(args.kinds) <= 1:
+        return
+
+    unsupported: list[str] = []
+    if args.name:
+        unsupported.append("--name")
+    if args.image:
+        unsupported.append("--image")
+    if args.port:
+        unsupported.append("--port")
+    if args.env:
+        unsupported.append("--env")
+    if args.volume:
+        unsupported.append("--volume")
+    if args.foreground:
+        unsupported.append("--foreground")
+    if args.container_command:
+        unsupported.append("container command after --")
+
+    if unsupported:
+        parser.error(
+            "multi-container launch does not support "
+            + ", ".join(unsupported)
+            + ". Launch one container at a time for per-container options."
+        )
+
+
 def main() -> None:
     parser = build_parser()
-    args, container_command = parser.parse_known_args()
-    if container_command[:1] == ["--"]:
-        container_command = container_command[1:]
-    args.container_command = container_command
+    args = parse_args(parser)
 
     if args.list:
         list_presets()
         return
 
-    if not args.kind:
-        parser.error("choose a container kind, or use --list")
-
-    preset = PRESETS.get(args.kind)
-    if preset is None:
-        available = ", ".join(sorted(PRESETS))
-        parser.error(f"unknown container kind {args.kind!r}. Available: {available}")
-
-    if not args.dry_run:
-        require_docker()
+    if not args.kinds:
+        parser.error("choose one or more container kinds, or use --list")
 
     if args.create_network and not args.network:
         parser.error("--create-network requires --network")
 
+    validate_multi_launch(parser, args)
+    presets = [(kind, validate_preset(parser, kind)) for kind in args.kinds]
+
+    if not args.dry_run:
+        require_docker()
+
     if args.create_network:
         run_checked(build_network_create_command(args.network), dry_run=args.dry_run)
 
-    return_code = run(build_run_command(args, preset), dry_run=args.dry_run)
-    if return_code == 0 and preset.note:
-        print(preset.note.replace("<name>", args.name or args.kind))
+    seen_names: dict[str, int] = {}
+    for kind, preset in presets:
+        name = container_name(args, kind, seen_names)
+        return_code = run(build_run_command(args, preset, name=name), dry_run=args.dry_run)
+        if return_code != 0:
+            sys.exit(return_code)
+        if preset.note:
+            print(preset.note.replace("<name>", name))
     sys.exit(return_code)
 
 
