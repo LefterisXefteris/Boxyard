@@ -72,13 +72,20 @@ def run(command: Sequence[str], *, dry_run: bool) -> int:
         return 127
 
 
+def run_checked(command: Sequence[str], *, dry_run: bool) -> int:
+    return_code = run(command, dry_run=dry_run)
+    if return_code != 0:
+        sys.exit(return_code)
+    return return_code
+
+
 def require_docker() -> None:
     if shutil.which("docker") is None:
         print("Error: Docker CLI was not found. Install Docker and try again.", file=sys.stderr)
         sys.exit(127)
 
 
-def build_command(args: argparse.Namespace, preset: Preset) -> list[str]:
+def build_run_command(args: argparse.Namespace, preset: Preset) -> list[str]:
     name = args.name or args.kind
     command = ["docker", "run"]
 
@@ -87,6 +94,9 @@ def build_command(args: argparse.Namespace, preset: Preset) -> list[str]:
         command.append("--detach")
 
     command.extend(["--name", name])
+
+    if args.network:
+        command.extend(["--network", args.network])
 
     ports = args.port or list(preset.ports)
     env = merge_env(list(preset.env), args.env)
@@ -103,6 +113,10 @@ def build_command(args: argparse.Namespace, preset: Preset) -> list[str]:
     command.append(args.image or preset.image)
     command.extend(args.container_command or preset.command)
     return command
+
+
+def build_network_create_command(network: str) -> list[str]:
+    return ["docker", "network", "create", network]
 
 
 def merge_env(defaults: list[str], overrides: list[str]) -> list[str]:
@@ -132,6 +146,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-p", "--port", action="append", default=[], help="Extra port mapping, for example 8080:80")
     parser.add_argument("-e", "--env", action="append", default=[], help="Extra environment variable, for example KEY=value")
     parser.add_argument("-v", "--volume", action="append", default=[], help="Extra volume, for example ./data:/data")
+    parser.add_argument("--network", help="Attach the container to a Docker network")
+    parser.add_argument("--create-network", action="store_true", help="Create --network before launching the container")
     parser.add_argument("--foreground", action="store_true", help="Run in foreground instead of detached mode")
     parser.add_argument("--dry-run", action="store_true", help="Print the docker command without running it")
     parser.epilog = "Anything after -- is passed to the container as its command."
@@ -160,7 +176,13 @@ def main() -> None:
     if not args.dry_run:
         require_docker()
 
-    return_code = run(build_command(args, preset), dry_run=args.dry_run)
+    if args.create_network and not args.network:
+        parser.error("--create-network requires --network")
+
+    if args.create_network:
+        run_checked(build_network_create_command(args.network), dry_run=args.dry_run)
+
+    return_code = run(build_run_command(args, preset), dry_run=args.dry_run)
     if return_code == 0 and preset.note:
         print(preset.note.replace("<name>", args.name or args.kind))
     sys.exit(return_code)

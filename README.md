@@ -69,6 +69,28 @@ uv run docker-launch mysql
 uv run docker-launch mongo
 ```
 
+Attach containers to the same Docker network so they can talk to each other:
+
+```bash
+uv run docker-manager network create boxyard-net
+uv run docker-launch postgres --name db --network boxyard-net
+uv run docker-launch redis --name cache --network boxyard-net
+uv run docker-launch alpine --name app --network boxyard-net
+```
+
+Inside the `app` container, the other containers are reachable by name:
+
+```text
+db:5432
+cache:6379
+```
+
+Create the network during launch:
+
+```bash
+uv run docker-launch postgres --name db --network boxyard-net --create-network
+```
+
 Preview the Docker command without creating a container:
 
 ```bash
@@ -117,6 +139,7 @@ uv run docker-launch nginx --name web -p 8080:80
 uv run docker-launch postgres --name db -e POSTGRES_PASSWORD=secret
 uv run docker-launch redis --name cache -p 6380:6379
 uv run docker-launch sqlite --name local-sqlite -v ./my-db:/data
+uv run docker-launch postgres --name db --network boxyard-net
 ```
 
 Anything after `--` is passed to the container as its command:
@@ -143,6 +166,20 @@ Manage multiple containers at once:
 uv run docker-manager stop web api worker
 uv run docker-manager remove web api worker --force
 ```
+
+## Manage Docker Networks
+
+```bash
+uv run docker-manager network list
+uv run docker-manager network create boxyard-net
+uv run docker-manager network connect boxyard-net web api worker
+uv run docker-manager network disconnect boxyard-net worker
+uv run docker-manager network remove boxyard-net
+```
+
+Containers on the same user-created bridge network can reach each other by
+container name. For example, a container named `api` can connect to Postgres at
+`db:5432` when both `api` and `db` are on `boxyard-net`.
 
 ## Plain Python Usage
 
