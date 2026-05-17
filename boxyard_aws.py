@@ -450,59 +450,6 @@ def inspect_ec2(args: argparse.Namespace) -> None:
     render_ec2_report(args, report)
 
 
-def demo_ec2_report() -> dict:
-    return {
-        "instance": {
-            "State": {"Name": "running"},
-            "InstanceType": "t3.micro",
-            "ImageId": "ami-0demo123456789",
-            "VpcId": "vpc-demo123",
-            "SubnetId": "subnet-demo123",
-            "PrivateIpAddress": "10.0.1.10",
-            "PublicIpAddress": "18.134.12.34",
-            "MetadataOptions": {"HttpTokens": "required"},
-            "Tags": [{"Key": "Name", "Value": "boxyard-demo"}],
-            "SecurityGroups": [{"GroupId": "sg-demo123", "GroupName": "web"}],
-        },
-        "ssm_instance": {"PingStatus": "Online", "AgentVersion": "3.3.1"},
-        "ssm_error": None,
-        "security_groups": [
-            {
-                "GroupId": "sg-demo123",
-                "GroupName": "web",
-                "IpPermissions": [
-                    {
-                        "IpProtocol": "tcp",
-                        "FromPort": 80,
-                        "ToPort": 80,
-                        "IpRanges": [{"CidrIp": "0.0.0.0/0"}],
-                        "Ipv6Ranges": [],
-                    }
-                ],
-            }
-        ],
-        "security_group_error": None,
-        "iam": {
-            "profile": "boxyard-profile",
-            "roles": ["boxyard-role"],
-            "attached_policies": [{"PolicyName": "AmazonSSMManagedInstanceCore"}],
-            "error": None,
-        },
-        "security_findings": [
-            {
-                "severity": "INFO",
-                "group": "web (sg-demo123)",
-                "message": "allows public inbound access on 80-80",
-            }
-        ],
-    }
-
-
-def inspect_ec2_demo(args: argparse.Namespace) -> None:
-    demo_args = argparse.Namespace(instance_id="i-boxyard-demo", region=args.region or "eu-west-2")
-    render_ec2_report(demo_args, demo_ec2_report())
-
-
 def install_docker_commands() -> list[str]:
     return [
         "if ! command -v docker >/dev/null 2>&1; then "
@@ -661,9 +608,6 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--instance-id", required=True, help="Target EC2 instance ID")
     inspect_parser.add_argument("--json", action="store_true", help="Print raw inspection data as JSON")
 
-    inspect_demo_parser = ec2_subparsers.add_parser("inspect-demo", help="Render a demo EC2 inspection UI")
-    add_common_aws_options(inspect_demo_parser)
-
     deploy_parser = ec2_subparsers.add_parser("deploy", help="Deploy an image to an EC2 instance through SSM")
     add_common_aws_options(deploy_parser)
     deploy_parser.add_argument("--instance-id", required=True, help="Target EC2 instance ID")
@@ -705,8 +649,6 @@ def main() -> None:
     elif args.command == "ec2":
         if args.ec2_command == "inspect":
             inspect_ec2(args)
-        elif args.ec2_command == "inspect-demo":
-            inspect_ec2_demo(args)
         elif args.ec2_command == "deploy":
             deploy_ec2(args)
         else:
