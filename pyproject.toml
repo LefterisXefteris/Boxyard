@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
+boxyard-aws = "boxyard_aws:main"
 docker-launch = "docker_launch:main"
 docker-manager = "docker_manager:main"
 
@@ -15,4 +16,4 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["docker_launch", "docker_manager"]
+py-modules = ["boxyard_aws", "docker_launch", "docker_manager"]

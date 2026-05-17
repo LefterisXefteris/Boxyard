@@ -38,6 +38,7 @@ When the virtual environment is active, you can use the installed commands:
 docker-launch --list
 docker-launch sqlite
 docker-manager list --all
+boxyard-aws auth status
 ```
 
 Deactivate the virtual environment when you are done:
@@ -54,6 +55,7 @@ You can also run everything through `uv` directly:
 uv run docker-launch --list
 uv run docker-launch sqlite
 uv run docker-manager list --all
+uv run boxyard-aws auth status
 ```
 
 ## Launch Containers
@@ -202,6 +204,79 @@ uv run docker-manager network remove boxyard-net
 Containers on the same user-created bridge network can reach each other by
 container name. For example, a container named `api` can connect to Postgres at
 `db:5432` when both `api` and `db` are on `boxyard-net`.
+
+## Deploy to AWS EC2
+
+Boxyard can deploy a Docker image to an EC2 instance through AWS Systems
+Manager. This avoids SSH from your laptop: Boxyard authenticates through the AWS
+CLI, sends a remote shell command to the instance, pulls the image, and runs the
+container.
+
+One-time requirements:
+
+- AWS CLI installed and configured
+- An EC2 instance with SSM Agent running
+- The EC2 instance has an IAM role with `AmazonSSMManagedInstanceCore`
+- Docker is installed on the instance, or use `--install-docker`
+- The image is pullable by the EC2 instance
+
+Check your AWS identity:
+
+```bash
+uv run boxyard-aws auth status --profile my-profile --region eu-west-2
+```
+
+Configure AWS SSO if needed:
+
+```bash
+uv run boxyard-aws auth sso
+uv run boxyard-aws auth login --profile my-profile
+```
+
+Preview an EC2 deployment:
+
+```bash
+uv run boxyard-aws ec2 deploy \
+  --profile my-profile \
+  --region eu-west-2 \
+  --instance-id i-0123456789abcdef0 \
+  --image nginx:latest \
+  --name web \
+  -p 80:80 \
+  --dry-run \
+  --show-script
+```
+
+Deploy the container:
+
+```bash
+uv run boxyard-aws ec2 deploy \
+  --profile my-profile \
+  --region eu-west-2 \
+  --instance-id i-0123456789abcdef0 \
+  --image nginx:latest \
+  --name web \
+  -p 80:80 \
+  --install-docker \
+  --wait
+```
+
+Deploy onto a Docker network on the EC2 instance:
+
+```bash
+uv run boxyard-aws ec2 deploy \
+  --profile my-profile \
+  --region eu-west-2 \
+  --instance-id i-0123456789abcdef0 \
+  --image redis:latest \
+  --name cache \
+  --network boxyard-net \
+  --create-network \
+  --wait
+```
+
+By default, Boxyard replaces an existing container with the same name. Use
+`--no-replace` to fail instead.
 
 ## Plain Python Usage
 
