@@ -1,22 +1,41 @@
 # Boxyard
 
-This is a small Python app for launching and managing one or more Docker
-containers. It is designed to run with `uv`, but it has no third-party Python
-dependencies.
+Boxyard is a small `uv`-based Python CLI for launching, managing, networking,
+and deploying Docker containers.
+
+It is meant to make common container workflows feel quick:
+
+- launch useful local containers from presets like `sqlite`, `postgres`, `redis`, `nginx`, `mysql`, and `mongo`
+- launch several containers in one command
+- connect containers to shared Docker networks so they can talk by name
+- manage existing containers and networks
+- inspect AWS EC2 deployment readiness with a terminal dashboard
+- deploy a Docker image to EC2 through AWS Systems Manager without SSH
+
+## Preview
+
+![Boxyard EC2 preflight dashboard](assets/boxyard-ec2-preflight.png)
+
+Try the dashboard locally without AWS credentials:
+
+```bash
+uv run boxyard-aws ec2 inspect-demo
+```
 
 ## Requirements
 
-- Docker installed and running
-- `uv` installed
 - Python 3.10+
+- `uv`
+- Docker installed and running for local container commands
+- AWS CLI for AWS commands
 
-Install `uv` if you do not already have it:
+Install `uv` if needed:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-## Set Up With uv
+## Set Up
 
 From this project folder:
 
@@ -24,38 +43,23 @@ From this project folder:
 uv sync
 ```
 
-That creates a local virtual environment in `.venv`.
-
-Activate the virtual environment:
-
-```bash
-source .venv/bin/activate
-```
-
-When the virtual environment is active, you can use the installed commands:
-
-```bash
-docker-launch --list
-docker-launch sqlite
-docker-manager list --all
-boxyard-aws auth status
-```
-
-Deactivate the virtual environment when you are done:
-
-```bash
-deactivate
-```
-
-## Run Without Activating
-
-You can also run everything through `uv` directly:
+Run commands through `uv`:
 
 ```bash
 uv run docker-launch --list
 uv run docker-launch sqlite
 uv run docker-manager list --all
-uv run boxyard-aws auth status
+uv run boxyard-aws ec2 inspect-demo
+```
+
+Or activate the virtual environment:
+
+```bash
+source .venv/bin/activate
+docker-launch --list
+docker-manager list --all
+boxyard-aws ec2 inspect-demo
+deactivate
 ```
 
 ## Launch Containers
@@ -71,29 +75,52 @@ uv run docker-launch mysql
 uv run docker-launch mongo
 ```
 
-Launch several containers in one command:
+List available presets:
+
+```bash
+uv run docker-launch --list
+```
+
+Preview a launch without creating a container:
+
+```bash
+uv run docker-launch sqlite --dry-run
+```
+
+## Launch Multiple Containers
+
+Launch one container per preset:
 
 ```bash
 uv run docker-launch postgres redis nginx --network boxyard-net --create-network
 ```
 
-That launches one container per preset:
+This creates containers named:
 
 ```text
-postgres  -> container name postgres
-redis     -> container name redis
-nginx     -> container name nginx
+postgres
+redis
+nginx
 ```
 
-Use a name prefix when launching a group:
+Use a prefix for grouped launches:
 
 ```bash
 uv run docker-launch postgres redis nginx --name-prefix app --network boxyard-net
 ```
 
-That creates containers named `app-postgres`, `app-redis`, and `app-nginx`.
+This creates:
 
-Attach containers to the same Docker network so they can talk to each other:
+```text
+app-postgres
+app-redis
+app-nginx
+```
+
+## Docker Networking
+
+Containers on the same user-created Docker network can talk to each other by
+container name.
 
 ```bash
 uv run docker-manager network create boxyard-net
@@ -102,47 +129,36 @@ uv run docker-launch redis --name cache --network boxyard-net
 uv run docker-launch alpine --name app --network boxyard-net
 ```
 
-Inside the `app` container, the other containers are reachable by name:
+Inside the `app` container:
 
 ```text
 db:5432
 cache:6379
 ```
 
-Create the network during launch:
+Manage networks:
 
 ```bash
-uv run docker-launch postgres --name db --network boxyard-net --create-network
-```
-
-Preview the Docker command without creating a container:
-
-```bash
-uv run docker-launch sqlite --dry-run
-```
-
-List available launch presets:
-
-```bash
-uv run docker-launch --list
+uv run docker-manager network list
+uv run docker-manager network create boxyard-net
+uv run docker-manager network connect boxyard-net web api worker
+uv run docker-manager network disconnect boxyard-net worker
+uv run docker-manager network remove boxyard-net
 ```
 
 ## SQLite Example
 
-This command:
+Launch SQLite:
 
 ```bash
 uv run docker-launch sqlite
 ```
 
-runs this Docker command underneath:
+Boxyard runs:
 
 ```bash
 docker run --detach --name sqlite --volume ./sqlite-data:/data keinos/sqlite3:latest tail -f /dev/null
 ```
-
-It creates a running container named `sqlite`, mounts a local `./sqlite-data`
-folder into the container at `/data`, and keeps the container alive.
 
 Open a SQLite database inside the container:
 
@@ -150,13 +166,13 @@ Open a SQLite database inside the container:
 docker exec -it sqlite sqlite3 /data/app.db
 ```
 
-Remove the SQLite container:
+Remove it:
 
 ```bash
 uv run docker-manager remove sqlite --force
 ```
 
-## Custom Names, Ports, Env Vars, and Volumes
+## Custom Launch Options
 
 ```bash
 uv run docker-launch nginx --name web -p 8080:80
@@ -166,13 +182,13 @@ uv run docker-launch sqlite --name local-sqlite -v ./my-db:/data
 uv run docker-launch postgres --name db --network boxyard-net
 ```
 
-Anything after `--` is passed to the container as its command:
+Anything after `--` is passed to the container:
 
 ```bash
 uv run docker-launch alpine --name box -- sh -lc "echo hello"
 ```
 
-## Manage Existing Containers
+## Manage Containers
 
 ```bash
 uv run docker-manager list
@@ -184,41 +200,49 @@ uv run docker-manager restart sqlite
 uv run docker-manager remove sqlite --force
 ```
 
-Manage multiple containers at once:
+Manage several containers at once:
 
 ```bash
 uv run docker-manager stop web api worker
 uv run docker-manager remove web api worker --force
 ```
 
-## Manage Docker Networks
+## AWS EC2 Inspection
+
+Boxyard can inspect an EC2 instance before deployment and show:
+
+- EC2 state, instance type, VPC, subnet, private IP, and public IP
+- SSM online status for no-SSH deployment
+- IAM instance profile and SSM policy when readable
+- security group warnings for public SSH, public all-port rules, and public inbound rules
+- IMDSv2 status
+- deployment readiness
+
+Demo the UI without AWS:
 
 ```bash
-uv run docker-manager network list
-uv run docker-manager network create boxyard-net
-uv run docker-manager network connect boxyard-net web api worker
-uv run docker-manager network disconnect boxyard-net worker
-uv run docker-manager network remove boxyard-net
+uv run boxyard-aws ec2 inspect-demo
 ```
 
-Containers on the same user-created bridge network can reach each other by
-container name. For example, a container named `api` can connect to Postgres at
-`db:5432` when both `api` and `db` are on `boxyard-net`.
+Inspect a real EC2 instance:
 
-## Deploy to AWS EC2
+```bash
+uv run boxyard-aws ec2 inspect \
+  --profile my-profile \
+  --region eu-west-2 \
+  --instance-id i-0123456789abcdef0
+```
 
-Boxyard can deploy a Docker image to an EC2 instance through AWS Systems
-Manager. This avoids SSH from your laptop: Boxyard authenticates through the AWS
-CLI, sends a remote shell command to the instance, pulls the image, and runs the
-container.
+Print raw inspection data:
 
-One-time requirements:
+```bash
+uv run boxyard-aws ec2 inspect \
+  --region eu-west-2 \
+  --instance-id i-0123456789abcdef0 \
+  --json
+```
 
-- AWS CLI installed and configured
-- An EC2 instance with SSM Agent running
-- The EC2 instance has an IAM role with `AmazonSSMManagedInstanceCore`
-- Docker is installed on the instance, or use `--install-docker`
-- The image is pullable by the EC2 instance
+## AWS Authentication
 
 Check your AWS identity:
 
@@ -233,24 +257,25 @@ uv run boxyard-aws auth sso
 uv run boxyard-aws auth login --profile my-profile
 ```
 
-Inspect an EC2 instance before deployment:
+If you use access keys instead of SSO:
 
 ```bash
-uv run boxyard-aws ec2 inspect \
-  --profile my-profile \
-  --region eu-west-2 \
-  --instance-id i-0123456789abcdef0
+aws configure
 ```
 
-The inspection shows:
+## Deploy to AWS EC2
 
-- EC2 state, instance type, VPC, subnet, private IP, and public IP
-- SSM online status, which Boxyard needs for no-SSH deployment
-- IAM instance profile and attached SSM policy when your AWS identity can read it
-- Security group warnings for public SSH, public all-port rules, and public inbound rules
-- IMDSv2 status
+Boxyard deploys to EC2 through AWS Systems Manager. That means your laptop does
+not need SSH access to the instance.
 
-Preview an EC2 deployment:
+One-time EC2 requirements:
+
+- SSM Agent running
+- IAM role with `AmazonSSMManagedInstanceCore`
+- Docker installed, or use `--install-docker`
+- the image is pullable by the EC2 instance
+
+Preview a deployment:
 
 ```bash
 uv run boxyard-aws ec2 deploy \
@@ -264,7 +289,7 @@ uv run boxyard-aws ec2 deploy \
   --show-script
 ```
 
-Deploy the container:
+Deploy:
 
 ```bash
 uv run boxyard-aws ec2 deploy \
@@ -278,7 +303,7 @@ uv run boxyard-aws ec2 deploy \
   --wait
 ```
 
-Deploy onto a Docker network on the EC2 instance:
+Deploy onto a Docker network on EC2:
 
 ```bash
 uv run boxyard-aws ec2 deploy \
@@ -302,4 +327,5 @@ The scripts still work directly with Python:
 ```bash
 python3 docker_launch.py sqlite
 python3 docker_manager.py list --all
+python3 boxyard_aws.py ec2 inspect-demo
 ```
