@@ -10,12 +10,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import shutil
 import subprocess
 import sys
 import time
 from typing import Sequence
+
+
+BOX_WIDTH = 88
+STATUS_STYLES = {
+    "OK": ("OK", "\033[32m"),
+    "WARN": ("WARN", "\033[33m"),
+    "INFO": ("INFO", "\033[36m"),
+    "UNKNOWN": ("UNKNOWN", "\033[35m"),
+}
+RESET = "\033[0m"
+DIM = "\033[2m"
+CYAN = "\033[36m"
+BOLD = "\033[1m"
 
 
 def require_aws_cli() -> None:
@@ -246,8 +260,56 @@ def security_group_findings(security_groups: list[dict]) -> list[dict]:
     return findings
 
 
-def status_line(status: str, label: str, detail: str) -> None:
-    print(f"[{status:<7}] {label:<22} {detail}")
+def supports_color() -> bool:
+    return sys.stdout.isatty() and not bool(os.environ.get("NO_COLOR"))
+
+
+def colorize(text: str, color: str) -> str:
+    if not supports_color():
+        return text
+    return f"{color}{text}{RESET}"
+
+
+def badge(status: str) -> str:
+    label, color = STATUS_STYLES.get(status, (status, "\033[37m"))
+    return colorize(f"[ {label.ljust(7)}]", color)
+
+
+def rule(title: str) -> None:
+    text = f" {title} "
+    line = "-" * max(0, BOX_WIDTH - len(text))
+    print(colorize(f"\n{text}{line}", DIM))
+
+
+def header(title: str, subtitle: str) -> None:
+    border = "=" * BOX_WIDTH
+    print(colorize(border, CYAN))
+    print(colorize(title, BOLD))
+    print(subtitle)
+    print(colorize(border, CYAN))
+
+
+def kv_rows(rows: list[tuple[str, str]]) -> None:
+    label_width = max((len(label) for label, _ in rows), default=0)
+    for label, value in rows:
+        formatted_label = colorize(label.ljust(label_width), DIM)
+        print(f"  {formatted_label}  {value}")
+
+
+def check_rows(rows: list[tuple[str, str, str]]) -> None:
+    label_width = max((len(label) for _, label, _ in rows), default=0)
+    for status, label, detail in rows:
+        print(f"  {badge(status)}  {label.ljust(label_width)}  {detail}")
+
+
+def summary_bar(ok_count: int, warn_count: int, info_count: int, unknown_count: int) -> str:
+    parts = [
+        colorize(f"OK {ok_count}", "\033[32m"),
+        colorize(f"WARN {warn_count}", "\033[33m"),
+        colorize(f"INFO {info_count}", "\033[36m"),
+        colorize(f"UNKNOWN {unknown_count}", "\033[35m"),
+    ]
+    return "  ".join(parts)
 
 
 def tag_value(instance: dict, key: str) -> str | None:
@@ -285,73 +347,98 @@ def render_ec2_report(args: argparse.Namespace, report: dict) -> None:
     iam_report = report["iam"]
     attached_policy_names = [policy.get("PolicyName", "") for policy in iam_report.get("attached_policies", [])]
     has_ssm_policy = "AmazonSSMManagedInstanceCore" in attached_policy_names
+    instance_rows = [
+        ("State", state),
+        ("Name", name),
+        ("Type", instance.get("InstanceType", "-")),
+        ("AMI", instance.get("ImageId", "-")),
+        ("VPC", instance.get("VpcId", "-")),
+        ("Subnet", instance.get("SubnetId", "-")),
+        ("Private IPv4", private_ip),
+        ("Public IPv4", public_ip),
+        ("IMDSv2", f"HttpTokens={metadata_tokens}"),
+    ]
+    checks: list[tuple[str, str, str]] = [
+        ("OK" if state == "running" else "WARN", "EC2 state", state),
+        ("OK" if metadata_tokens == "required" else "WARN", "IMDSv2", f"HttpTokens={metadata_tokens}"),
+    ]
 
-    print(f"Boxyard EC2 preflight: {args.instance_id}")
-    print("")
-    print("Instance")
-    status_line("OK" if state == "running" else "WARN", "State", state)
-    status_line("INFO", "Name", name)
-    status_line("INFO", "Type", instance.get("InstanceType", "-"))
-    status_line("INFO", "AMI", instance.get("ImageId", "-"))
-    status_line("INFO", "VPC", instance.get("VpcId", "-"))
-    status_line("INFO", "Subnet", instance.get("SubnetId", "-"))
-    status_line("INFO", "Private IPv4", private_ip)
-    status_line("INFO" if public_ip != "-" else "WARN", "Public IPv4", public_ip)
-    status_line("OK" if metadata_tokens == "required" else "WARN", "IMDSv2", f"HttpTokens={metadata_tokens}")
-
-    print("")
-    print("SSM")
     if report["ssm_error"]:
-        status_line("UNKNOWN", "SSM status", report["ssm_error"])
+        ssm_rows = [("UNKNOWN", "SSM status", report["ssm_error"])]
     elif ssm_instance:
         ping_status = ssm_instance.get("PingStatus", "unknown")
         agent_version = ssm_instance.get("AgentVersion", "-")
-        status_line("OK" if ping_status == "Online" else "WARN", "SSM ping", ping_status)
-        status_line("INFO", "SSM agent", agent_version)
+        ssm_rows = [
+            ("OK" if ping_status == "Online" else "WARN", "SSM ping", ping_status),
+            ("INFO", "SSM agent", agent_version),
+        ]
     else:
-        status_line("WARN", "SSM status", "not registered or not visible to this AWS identity")
+        ssm_rows = [("WARN", "SSM status", "not registered or not visible to this AWS identity")]
+    checks.extend(ssm_rows)
 
-    print("")
-    print("IAM")
     if iam_report.get("profile"):
-        status_line("INFO", "Instance profile", iam_report["profile"])
-        status_line("INFO", "Role(s)", ", ".join(iam_report["roles"]) or "-")
+        iam_rows = [
+            ("INFO", "Instance profile", iam_report["profile"]),
+            ("INFO", "Role(s)", ", ".join(iam_report["roles"]) or "-"),
+        ]
         if iam_report.get("error"):
-            status_line("UNKNOWN", "Role policies", iam_report["error"])
+            iam_rows.append(("UNKNOWN", "Role policies", iam_report["error"]))
         else:
-            status_line(
-                "OK" if has_ssm_policy else "WARN",
-                "SSM policy",
-                "AmazonSSMManagedInstanceCore attached" if has_ssm_policy else "not found in attached policies",
+            iam_rows.append(
+                (
+                    "OK" if has_ssm_policy else "WARN",
+                    "SSM policy",
+                    "AmazonSSMManagedInstanceCore attached" if has_ssm_policy else "not found in attached policies",
+                )
             )
     else:
-        status_line("WARN", "Instance profile", "none attached")
+        iam_rows = [("WARN", "Instance profile", "none attached")]
+    checks.extend(iam_rows)
 
-    print("")
-    print("Security Groups")
     if report["security_group_error"]:
-        status_line("UNKNOWN", "Security groups", report["security_group_error"])
+        security_rows = [("UNKNOWN", "Security groups", report["security_group_error"])]
     elif not report["security_groups"]:
-        status_line("WARN", "Security groups", "none found")
+        security_rows = [("WARN", "Security groups", "none found")]
     else:
-        for group in report["security_groups"]:
-            status_line("INFO", "Group", f"{group.get('GroupName', '-')} ({group.get('GroupId', '-')})")
+        security_rows = [
+            ("INFO", "Group", f"{group.get('GroupName', '-')} ({group.get('GroupId', '-')})")
+            for group in report["security_groups"]
+        ]
         findings = report["security_findings"]
         if findings:
             for finding in findings:
-                status_line(finding["severity"], finding["group"], finding["message"])
+                security_rows.append((finding["severity"], finding["group"], finding["message"]))
         else:
-            status_line("OK", "Inbound exposure", "no public 0.0.0.0/0 or ::/0 inbound rules found")
+            security_rows.append(("OK", "Inbound exposure", "no public 0.0.0.0/0 or ::/0 inbound rules found"))
+    checks.extend(security_rows)
 
-    print("")
-    print("Deploy Readiness")
-    status_line("OK" if state == "running" else "WARN", "EC2 running", "required for deployment")
     if ssm_instance and ssm_instance.get("PingStatus") == "Online":
-        status_line("OK", "SSM online", "Boxyard can send deployment commands")
+        readiness_rows = [("OK", "SSM online", "Boxyard can send deployment commands")]
     else:
-        status_line("WARN", "SSM online", "required unless you add an SSH deployment path later")
+        readiness_rows = [("WARN", "SSM online", "required unless you add an SSH deployment path later")]
     if public_ip == "-":
-        status_line("INFO", "Public traffic", "no public IP; use private networking, VPN, ALB, or assign public access")
+        readiness_rows.append(
+            ("INFO", "Public traffic", "no public IP; use private networking, VPN, ALB, or assign public access")
+        )
+    checks.extend(readiness_rows)
+
+    counts = {status: sum(1 for row in checks if row[0] == status) for status in ("OK", "WARN", "INFO", "UNKNOWN")}
+
+    header("Boxyard EC2 Preflight", f"{args.instance_id}  |  {name}  |  {args.region or 'default region'}")
+    print("")
+    print(summary_bar(counts["OK"], counts["WARN"], counts["INFO"], counts["UNKNOWN"]))
+    rule("Instance")
+    kv_rows(instance_rows)
+    rule("SSM")
+    check_rows(ssm_rows)
+    rule("IAM")
+    check_rows(iam_rows)
+    rule("Security Groups")
+    check_rows(security_rows)
+    rule("Deploy Readiness")
+    readiness_rows.insert(0, ("OK" if state == "running" else "WARN", "EC2 running", "required for deployment"))
+    check_rows(readiness_rows)
+    print("")
 
 
 def inspect_ec2(args: argparse.Namespace) -> None:
