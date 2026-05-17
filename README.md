@@ -233,6 +233,23 @@ uv run boxyard-aws auth sso
 uv run boxyard-aws auth login --profile my-profile
 ```
 
+Inspect an EC2 instance before deployment:
+
+```bash
+uv run boxyard-aws ec2 inspect \
+  --profile my-profile \
+  --region eu-west-2 \
+  --instance-id i-0123456789abcdef0
+```
+
+The inspection shows:
+
+- EC2 state, instance type, VPC, subnet, private IP, and public IP
+- SSM online status, which Boxyard needs for no-SSH deployment
+- IAM instance profile and attached SSM policy when your AWS identity can read it
+- Security group warnings for public SSH, public all-port rules, and public inbound rules
+- IMDSv2 status
+
 Preview an EC2 deployment:
 
 ```bash
