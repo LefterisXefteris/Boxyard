@@ -17,6 +17,7 @@ image.
 - Manage Docker networks: list, create, connect, disconnect, and remove
 - Inspect EC2 deployment readiness with a terminal dashboard
 - Deploy a Docker image to EC2 through AWS Systems Manager, without SSH
+- Build a Dockerfile app, push the image, and deploy it to an existing EC2 instance
 
 ## Preview
 
@@ -337,6 +338,74 @@ uv run boxyard-aws ec2 deploy \
 
 By default, Boxyard replaces an existing container with the same name. Use
 `--no-replace` to fail instead.
+
+## Ship an App From Dockerfile to EC2
+
+Use `ship` when you have already created the AWS resources and want Boxyard to
+do the command-line workflow:
+
+1. Build your app from a Dockerfile
+2. Tag the image with a registry URI
+3. Log in to ECR when the image URI is an ECR registry
+4. Push the image
+5. Deploy that image as a container to your EC2 instance through SSM
+
+Expected existing resources:
+
+- an EC2 instance with SSM access
+- a container registry such as ECR
+- permissions for `aws ecr get-login-password`, `docker push`, and SSM deploy
+
+Preview the whole workflow:
+
+```bash
+uv run boxyard-aws ec2 ship \
+  --profile my-profile \
+  --region eu-west-2 \
+  --instance-id i-0123456789abcdef0 \
+  --context . \
+  --dockerfile Dockerfile \
+  --image-uri 123456789012.dkr.ecr.eu-west-2.amazonaws.com/my-app:latest \
+  --name web \
+  -p 80:8000 \
+  --install-docker \
+  --dry-run \
+  --show-script
+```
+
+Build, push, and deploy:
+
+```bash
+uv run boxyard-aws ec2 ship \
+  --profile my-profile \
+  --region eu-west-2 \
+  --instance-id i-0123456789abcdef0 \
+  --context . \
+  --dockerfile Dockerfile \
+  --image-uri 123456789012.dkr.ecr.eu-west-2.amazonaws.com/my-app:latest \
+  --name web \
+  -p 80:8000 \
+  --install-docker \
+  --wait
+```
+
+If `--image-uri` has no tag, Boxyard appends `--tag`:
+
+```bash
+uv run boxyard-aws ec2 ship \
+  --region eu-west-2 \
+  --instance-id i-0123456789abcdef0 \
+  --image-uri 123456789012.dkr.ecr.eu-west-2.amazonaws.com/my-app \
+  --tag v1 \
+  --name web
+```
+
+Skip steps when needed:
+
+```bash
+uv run boxyard-aws ec2 ship --skip-build --image-uri 123456789012.dkr.ecr.eu-west-2.amazonaws.com/my-app:latest --instance-id i-0123456789abcdef0
+uv run boxyard-aws ec2 ship --skip-push --image-uri 123456789012.dkr.ecr.eu-west-2.amazonaws.com/my-app:latest --instance-id i-0123456789abcdef0
+```
 
 ## Plain Python Usage
 

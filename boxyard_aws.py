@@ -38,6 +38,12 @@ def require_aws_cli() -> None:
         sys.exit(127)
 
 
+def require_docker_cli() -> None:
+    if shutil.which("docker") is None:
+        print("Error: Docker CLI was not found. Install Docker and try again.", file=sys.stderr)
+        sys.exit(127)
+
+
 def aws_base_args(args: argparse.Namespace) -> list[str]:
     command = ["aws"]
     if getattr(args, "profile", None):
@@ -67,6 +73,10 @@ def exit_if_failed(result: subprocess.CompletedProcess[str]) -> None:
         if result.stderr:
             print(result.stderr.strip(), file=sys.stderr)
         sys.exit(result.returncode)
+
+
+def print_step(message: str) -> None:
+    print(colorize(f"\n=> {message}", BOLD))
 
 
 def auth_status(args: argparse.Namespace) -> None:
@@ -579,9 +589,105 @@ def deploy_ec2(args: argparse.Namespace) -> None:
         wait_for_ssm_command(args, command_id)
 
 
+def normalize_image_uri(image_uri: str, tag: str) -> str:
+    image_name = image_uri.rsplit("/", 1)[-1]
+    if ":" in image_name:
+        return image_uri
+    return f"{image_uri}:{tag}"
+
+
+def image_registry(image_uri: str) -> str | None:
+    first_part = image_uri.split("/", 1)[0]
+    if "." not in first_part and ":" not in first_part and first_part != "localhost":
+        return None
+    return first_part
+
+
+def is_ecr_registry(registry: str | None) -> bool:
+    return bool(registry and ".dkr.ecr." in registry and ".amazonaws.com" in registry)
+
+
+def docker_build(args: argparse.Namespace, image_uri: str) -> None:
+    command = ["docker", "build", "--tag", image_uri, "--file", args.dockerfile, args.context]
+    print_step("Build image")
+    exit_if_failed(run(command, dry_run=args.dry_run))
+
+
+def docker_ecr_login(args: argparse.Namespace, registry: str) -> None:
+    print_step("Authenticate Docker to ECR")
+    password_command = [*aws_base_args(args), "ecr", "get-login-password"]
+    login_command = ["docker", "login", "--username", "AWS", "--password-stdin", registry]
+
+    if args.dry_run:
+        print(" ".join(shlex.quote(part) for part in password_command) + " | " + " ".join(shlex.quote(part) for part in login_command))
+        return
+
+    password_result = run(password_command, capture=True, quiet=True)
+    exit_if_failed(password_result)
+    printable_login = " ".join(shlex.quote(part) for part in login_command)
+    print(printable_login)
+    login_result = subprocess.run(
+        login_command,
+        input=password_result.stdout,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    exit_if_failed(login_result)
+    if login_result.stdout:
+        print(login_result.stdout.strip())
+
+
+def docker_push(args: argparse.Namespace, image_uri: str) -> None:
+    print_step("Push image")
+    exit_if_failed(run(["docker", "push", image_uri], dry_run=args.dry_run))
+
+
+def ship_ec2(args: argparse.Namespace) -> None:
+    image_uri = normalize_image_uri(args.image_uri, args.tag)
+    registry = image_registry(image_uri)
+
+    if not args.dry_run:
+        require_aws_cli()
+        require_docker_cli()
+
+    if not args.skip_build:
+        docker_build(args, image_uri)
+
+    if not args.skip_push:
+        if args.ecr_login or (args.ecr_login is None and is_ecr_registry(registry)):
+            if not registry:
+                print("Error: --ecr-login requires a registry image URI", file=sys.stderr)
+                sys.exit(2)
+            docker_ecr_login(args, registry)
+        docker_push(args, image_uri)
+
+    deploy_args = argparse.Namespace(**vars(args))
+    deploy_args.image = image_uri
+    print_step("Deploy image to EC2")
+    deploy_ec2(deploy_args)
+
+
 def add_common_aws_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--profile", help="AWS CLI profile to use")
     parser.add_argument("--region", help="AWS region, for example eu-west-2")
+
+
+def add_container_run_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--name", default="app", help="Container name. Defaults to app")
+    parser.add_argument("-p", "--port", action="append", default=[], help="Port mapping, for example 80:8080")
+    parser.add_argument("-e", "--env", action="append", default=[], help="Environment variable, for example KEY=value")
+    parser.add_argument("-v", "--volume", action="append", default=[], help="Volume mapping, for example /host:/app/data")
+    parser.add_argument("--network", help="Docker network on the EC2 instance")
+    parser.add_argument("--create-network", action="store_true", help="Create --network on the EC2 instance")
+    parser.add_argument("--install-docker", action="store_true", help="Install and start Docker if missing")
+    parser.add_argument("--no-replace", dest="replace", action="store_false", help="Fail if the container already exists")
+    parser.add_argument("--wait", action="store_true", help="Wait for the SSM command to finish and print output")
+    parser.add_argument("--poll-seconds", type=int, default=5, help="Poll interval for --wait")
+    parser.add_argument("--show-script", action="store_true", help="Print the remote shell script before sending it")
+    parser.add_argument("--dry-run", action="store_true", help="Print commands without running them")
+    parser.add_argument("container_command", nargs=argparse.REMAINDER, help="Optional command for the container")
+    parser.set_defaults(replace=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -612,20 +718,22 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_aws_options(deploy_parser)
     deploy_parser.add_argument("--instance-id", required=True, help="Target EC2 instance ID")
     deploy_parser.add_argument("--image", required=True, help="Docker image to deploy, for example nginx:latest")
-    deploy_parser.add_argument("--name", default="app", help="Container name. Defaults to app")
-    deploy_parser.add_argument("-p", "--port", action="append", default=[], help="Port mapping, for example 80:8080")
-    deploy_parser.add_argument("-e", "--env", action="append", default=[], help="Environment variable, for example KEY=value")
-    deploy_parser.add_argument("-v", "--volume", action="append", default=[], help="Volume mapping, for example /host:/app/data")
-    deploy_parser.add_argument("--network", help="Docker network on the EC2 instance")
-    deploy_parser.add_argument("--create-network", action="store_true", help="Create --network on the EC2 instance")
-    deploy_parser.add_argument("--install-docker", action="store_true", help="Install and start Docker if missing")
-    deploy_parser.add_argument("--no-replace", dest="replace", action="store_false", help="Fail if the container already exists")
-    deploy_parser.add_argument("--wait", action="store_true", help="Wait for the SSM command to finish and print output")
-    deploy_parser.add_argument("--poll-seconds", type=int, default=5, help="Poll interval for --wait")
-    deploy_parser.add_argument("--show-script", action="store_true", help="Print the remote shell script before sending it")
-    deploy_parser.add_argument("--dry-run", action="store_true", help="Print AWS CLI commands without running them")
-    deploy_parser.add_argument("container_command", nargs=argparse.REMAINDER, help="Optional command for the container")
-    deploy_parser.set_defaults(replace=True)
+    add_container_run_options(deploy_parser)
+
+    ship_parser = ec2_subparsers.add_parser("ship", help="Build, push, and deploy a Dockerfile app to EC2")
+    add_common_aws_options(ship_parser)
+    ship_parser.add_argument("--instance-id", required=True, help="Target EC2 instance ID")
+    ship_parser.add_argument("--image-uri", required=True, help="Final image URI, usually an ECR URI")
+    ship_parser.add_argument("--tag", default="latest", help="Tag to append when --image-uri has no tag")
+    ship_parser.add_argument("--context", default=".", help="Docker build context. Defaults to current directory")
+    ship_parser.add_argument("--dockerfile", default="Dockerfile", help="Dockerfile path. Defaults to Dockerfile")
+    ship_parser.add_argument("--skip-build", action="store_true", help="Skip docker build")
+    ship_parser.add_argument("--skip-push", action="store_true", help="Skip docker push")
+    ecr_group = ship_parser.add_mutually_exclusive_group()
+    ecr_group.add_argument("--ecr-login", dest="ecr_login", action="store_true", help="Force ECR docker login before push")
+    ecr_group.add_argument("--no-ecr-login", dest="ecr_login", action="store_false", help="Skip automatic ECR docker login")
+    ship_parser.set_defaults(ecr_login=None)
+    add_container_run_options(ship_parser)
 
     return parser
 
@@ -651,6 +759,8 @@ def main() -> None:
             inspect_ec2(args)
         elif args.ec2_command == "deploy":
             deploy_ec2(args)
+        elif args.ec2_command == "ship":
+            ship_ec2(args)
         else:
             parser.error(f"Unknown ec2 command: {args.ec2_command}")
     else:
