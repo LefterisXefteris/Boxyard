@@ -18,6 +18,7 @@ image.
 - Inspect EC2 deployment readiness with a terminal dashboard
 - Deploy a Docker image to EC2 through AWS Systems Manager, without SSH
 - Build a Dockerfile app, push the image, and deploy it to an existing EC2 instance
+- Build, push, and deploy a containerized agent to ECS Fargate as a private worker
 
 ## Preview
 
@@ -405,6 +406,59 @@ Skip steps when needed:
 ```bash
 uv run boxyard-aws ec2 ship --skip-build --image-uri 123456789012.dkr.ecr.eu-west-2.amazonaws.com/my-app:latest --instance-id i-0123456789abcdef0
 uv run boxyard-aws ec2 ship --skip-push --image-uri 123456789012.dkr.ecr.eu-west-2.amazonaws.com/my-app:latest --instance-id i-0123456789abcdef0
+```
+
+## Ship an Agent to ECS Fargate
+
+Use `ecs agent ship` when you have a containerized LangGraph, AutoGen, or custom
+agent and want to run it as a private ECS Fargate worker.
+
+V1 expects existing AWS networking. Pass one or more private subnets, and pass
+security groups when your account or VPC requires them. Boxyard does not create
+IAM roles in this flow; provide existing task roles when your agent needs AWS
+permissions or when your ECS account defaults are not enough.
+
+Preview the build, push, task definition, and service commands:
+
+```bash
+uv run boxyard-aws ecs agent ship \
+  --profile my-profile \
+  --region eu-west-2 \
+  --name support-agent \
+  --image-uri 123456789012.dkr.ecr.eu-west-2.amazonaws.com/support-agent:latest \
+  --subnet subnet-0123456789abcdef0 \
+  --subnet subnet-abcdef0123456789a \
+  --security-group sg-0123456789abcdef0 \
+  --env OPENAI_MODEL=gpt-4.1 \
+  --secret OPENAI_API_KEY=arn:aws:ssm:eu-west-2:123456789012:parameter/openai-api-key \
+  --command python -m agent.worker \
+  --dry-run \
+  --show-commands
+```
+
+Build, push, and deploy:
+
+```bash
+uv run boxyard-aws ecs agent ship \
+  --profile my-profile \
+  --region eu-west-2 \
+  --name support-agent \
+  --image-uri 123456789012.dkr.ecr.eu-west-2.amazonaws.com/support-agent:latest \
+  --subnet subnet-0123456789abcdef0 \
+  --subnet subnet-abcdef0123456789a \
+  --security-group sg-0123456789abcdef0 \
+  --execution-role-arn arn:aws:iam::123456789012:role/ecsTaskExecutionRole \
+  --task-role-arn arn:aws:iam::123456789012:role/supportAgentTaskRole \
+  --desired-count 1 \
+  --wait
+```
+
+Useful options:
+
+```bash
+uv run boxyard-aws ecs agent ship --name support-agent --image-uri 123456789012.dkr.ecr.eu-west-2.amazonaws.com/support-agent --tag v1 --subnet subnet-0123456789abcdef0
+uv run boxyard-aws ecs agent ship --name support-agent --image-uri 123456789012.dkr.ecr.eu-west-2.amazonaws.com/support-agent:latest --subnet subnet-0123456789abcdef0 --skip-build
+uv run boxyard-aws ecs agent ship --name support-agent --image-uri 123456789012.dkr.ecr.eu-west-2.amazonaws.com/support-agent:latest --subnet subnet-0123456789abcdef0 --skip-push
 ```
 
 ## Plain Python Usage

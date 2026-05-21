@@ -643,6 +643,289 @@ def docker_push(args: argparse.Namespace, image_uri: str) -> None:
     exit_if_failed(run(["docker", "push", image_uri], dry_run=args.dry_run))
 
 
+def parse_key_value_items(items: list[str], *, label: str) -> list[dict]:
+    parsed: list[dict] = []
+    for item in items:
+        if "=" not in item:
+            print(f"Error: {label} must use KEY=value format: {item}", file=sys.stderr)
+            sys.exit(2)
+        name, value = item.split("=", 1)
+        if not name:
+            print(f"Error: {label} name cannot be empty: {item}", file=sys.stderr)
+            sys.exit(2)
+        parsed.append({"name": name, "value": value})
+    return parsed
+
+
+def ecs_log_group_name(agent_name: str) -> str:
+    return f"/boxyard/agents/{agent_name}"
+
+
+def ecs_log_region(args: argparse.Namespace) -> str:
+    region = args.region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region:
+        print(
+            "Error: ECS agent ship requires --region, AWS_REGION, or AWS_DEFAULT_REGION for CloudWatch logs.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return region
+
+
+def ecs_create_cluster_command(args: argparse.Namespace) -> list[str]:
+    return [*aws_base_args(args), "ecs", "create-cluster", "--cluster-name", args.cluster]
+
+
+def ecs_describe_cluster_command(args: argparse.Namespace) -> list[str]:
+    return [*aws_base_args(args), "ecs", "describe-clusters", "--clusters", args.cluster]
+
+
+def ecs_create_log_group_command(args: argparse.Namespace) -> list[str]:
+    return [*aws_base_args(args), "logs", "create-log-group", "--log-group-name", ecs_log_group_name(args.name)]
+
+
+def ecs_task_definition_payload(args: argparse.Namespace, image_uri: str) -> dict:
+    container: dict = {
+        "name": args.name,
+        "image": image_uri,
+        "essential": True,
+        "environment": parse_key_value_items(args.env, label="--env"),
+        "secrets": parse_key_value_items(args.secret, label="--secret"),
+        "logConfiguration": {
+            "logDriver": "awslogs",
+            "options": {
+                "awslogs-group": ecs_log_group_name(args.name),
+                "awslogs-region": ecs_log_region(args),
+                "awslogs-stream-prefix": args.name,
+            },
+        },
+    }
+    if args.agent_container_command:
+        container["command"] = args.agent_container_command
+
+    payload: dict = {
+        "family": args.name,
+        "networkMode": "awsvpc",
+        "requiresCompatibilities": ["FARGATE"],
+        "cpu": str(args.cpu),
+        "memory": str(args.memory),
+        "containerDefinitions": [container],
+    }
+    if args.execution_role_arn:
+        payload["executionRoleArn"] = args.execution_role_arn
+    if args.task_role_arn:
+        payload["taskRoleArn"] = args.task_role_arn
+    return payload
+
+
+def ecs_register_task_definition_command(args: argparse.Namespace, payload: dict) -> list[str]:
+    return [
+        *aws_base_args(args),
+        "ecs",
+        "register-task-definition",
+        "--cli-input-json",
+        json.dumps(payload),
+    ]
+
+
+def ecs_network_configuration(args: argparse.Namespace) -> str:
+    values = [f"subnets=[{','.join(args.subnet)}]", "assignPublicIp=DISABLED"]
+    if args.security_group:
+        values.insert(1, f"securityGroups=[{','.join(args.security_group)}]")
+    return "awsvpcConfiguration={" + ",".join(values) + "}"
+
+
+def ecs_describe_service_command(args: argparse.Namespace) -> list[str]:
+    return [
+        *aws_base_args(args),
+        "ecs",
+        "describe-services",
+        "--cluster",
+        args.cluster,
+        "--services",
+        args.name,
+    ]
+
+
+def ecs_create_service_command(args: argparse.Namespace, task_definition: str) -> list[str]:
+    return [
+        *aws_base_args(args),
+        "ecs",
+        "create-service",
+        "--cluster",
+        args.cluster,
+        "--service-name",
+        args.name,
+        "--task-definition",
+        task_definition,
+        "--launch-type",
+        "FARGATE",
+        "--desired-count",
+        str(args.desired_count),
+        "--network-configuration",
+        ecs_network_configuration(args),
+    ]
+
+
+def ecs_update_service_command(args: argparse.Namespace, task_definition: str) -> list[str]:
+    return [
+        *aws_base_args(args),
+        "ecs",
+        "update-service",
+        "--cluster",
+        args.cluster,
+        "--service",
+        args.name,
+        "--task-definition",
+        task_definition,
+        "--desired-count",
+        str(args.desired_count),
+        "--network-configuration",
+        ecs_network_configuration(args),
+    ]
+
+
+def create_or_reuse_ecs_cluster(args: argparse.Namespace) -> None:
+    print_step("Create or reuse ECS cluster")
+    if args.dry_run:
+        run(ecs_describe_cluster_command(args), dry_run=True)
+        run(ecs_create_cluster_command(args), dry_run=True)
+        return
+
+    result = run(ecs_describe_cluster_command(args), capture=True, quiet=True)
+    exit_if_failed(result)
+    payload = json.loads(result.stdout)
+    clusters = payload.get("clusters", [])
+    if clusters and clusters[0].get("status") != "INACTIVE":
+        print(f"Cluster already exists: {args.cluster}")
+        return
+
+    exit_if_failed(run(ecs_create_cluster_command(args), dry_run=args.dry_run))
+
+
+def create_or_reuse_log_group(args: argparse.Namespace) -> None:
+    print_step("Ensure CloudWatch log group")
+    result = run(ecs_create_log_group_command(args), capture=True, dry_run=args.dry_run)
+    if result.returncode == 0:
+        if result.stdout:
+            print(result.stdout.strip())
+        return
+    if "ResourceAlreadyExistsException" in result.stderr:
+        print(f"Log group already exists: {ecs_log_group_name(args.name)}")
+        return
+    exit_if_failed(result)
+
+
+def register_ecs_task_definition(args: argparse.Namespace, image_uri: str) -> str:
+    print_step("Register ECS task definition")
+    payload = ecs_task_definition_payload(args, image_uri)
+    if args.show_commands:
+        print(json.dumps(payload, indent=2))
+    result = run(ecs_register_task_definition_command(args, payload), capture=True, dry_run=args.dry_run)
+    exit_if_failed(result)
+    if args.dry_run:
+        return f"{args.name}:dry-run"
+    response = json.loads(result.stdout)
+    task_definition = response.get("taskDefinition", {}).get("taskDefinitionArn")
+    if not task_definition:
+        print("Error: ECS did not return a task definition ARN", file=sys.stderr)
+        sys.exit(1)
+    print(f"Task definition: {task_definition}")
+    return task_definition
+
+
+def ecs_service_exists(args: argparse.Namespace) -> bool:
+    result = run(ecs_describe_service_command(args), capture=True, quiet=True)
+    exit_if_failed(result)
+    payload = json.loads(result.stdout)
+    services = payload.get("services", [])
+    return bool(services and services[0].get("status") != "INACTIVE")
+
+
+def create_or_update_ecs_service(args: argparse.Namespace, task_definition: str) -> None:
+    print_step("Create or update ECS service")
+    if args.dry_run:
+        run(ecs_describe_service_command(args), dry_run=True)
+        run(ecs_create_service_command(args, task_definition), dry_run=True)
+        run(ecs_update_service_command(args, task_definition), dry_run=True)
+        return
+
+    if ecs_service_exists(args):
+        exit_if_failed(run(ecs_update_service_command(args, task_definition)))
+    else:
+        exit_if_failed(run(ecs_create_service_command(args, task_definition)))
+
+
+def wait_for_ecs_service(args: argparse.Namespace) -> None:
+    if args.dry_run or not args.wait:
+        return
+    print_step("Wait for ECS service stability")
+    exit_if_failed(
+        run(
+            [
+                *aws_base_args(args),
+                "ecs",
+                "wait",
+                "services-stable",
+                "--cluster",
+                args.cluster,
+                "--services",
+                args.name,
+            ]
+        )
+    )
+
+
+def print_ecs_agent_summary(args: argparse.Namespace, task_definition: str) -> None:
+    print_step("ECS agent deployment")
+    print(f"Cluster: {args.cluster}")
+    print(f"Service: {args.name}")
+    print(f"Task definition: {task_definition}")
+    print(f"Logs: aws logs tail {shlex.quote(ecs_log_group_name(args.name))} --follow")
+    print(
+        "Status: "
+        + " ".join(
+            shlex.quote(part)
+            for part in [
+                *aws_base_args(args),
+                "ecs",
+                "describe-services",
+                "--cluster",
+                args.cluster,
+                "--services",
+                args.name,
+            ]
+        )
+    )
+
+
+def ship_ecs_agent(args: argparse.Namespace) -> None:
+    image_uri = normalize_image_uri(args.image_uri, args.tag)
+    registry = image_registry(image_uri)
+
+    if not args.dry_run:
+        require_aws_cli()
+        require_docker_cli()
+
+    if not args.skip_build:
+        docker_build(args, image_uri)
+
+    if not args.skip_push:
+        if args.ecr_login or (args.ecr_login is None and is_ecr_registry(registry)):
+            if not registry:
+                print("Error: --ecr-login requires a registry image URI", file=sys.stderr)
+                sys.exit(2)
+            docker_ecr_login(args, registry)
+        docker_push(args, image_uri)
+
+    create_or_reuse_ecs_cluster(args)
+    create_or_reuse_log_group(args)
+    task_definition = register_ecs_task_definition(args, image_uri)
+    create_or_update_ecs_service(args, task_definition)
+    wait_for_ecs_service(args)
+    print_ecs_agent_summary(args, task_definition)
+
+
 def ship_ec2(args: argparse.Namespace) -> None:
     image_uri = normalize_image_uri(args.image_uri, args.tag)
     registry = image_registry(image_uri)
@@ -690,6 +973,40 @@ def add_container_run_options(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(replace=True)
 
 
+def add_ecs_agent_ship_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--name", required=True, help="Agent and ECS service name")
+    parser.add_argument("--image-uri", required=True, help="Final image URI, usually an ECR URI")
+    parser.add_argument("--subnet", action="append", required=True, help="Private subnet ID. Repeat for multiple subnets")
+    parser.add_argument("--cluster", default="boxyard-agents", help="ECS cluster name. Defaults to boxyard-agents")
+    parser.add_argument("--context", default=".", help="Docker build context. Defaults to current directory")
+    parser.add_argument("--dockerfile", default="Dockerfile", help="Dockerfile path. Defaults to Dockerfile")
+    parser.add_argument("--tag", default="latest", help="Tag to append when --image-uri has no tag")
+    parser.add_argument("--cpu", default="512", help="Fargate task CPU units. Defaults to 512")
+    parser.add_argument("--memory", default="1024", help="Fargate task memory MiB. Defaults to 1024")
+    parser.add_argument("--desired-count", type=int, default=1, help="ECS desired task count. Defaults to 1")
+    parser.add_argument("--security-group", action="append", default=[], help="Security group ID. Repeat for multiple groups")
+    parser.add_argument("-e", "--env", action="append", default=[], help="Environment variable, for example KEY=value")
+    parser.add_argument("--secret", action="append", default=[], help="Secret mapping, for example KEY=secret-or-parameter-arn")
+    parser.add_argument("--execution-role-arn", help="Existing ECS task execution role ARN")
+    parser.add_argument("--task-role-arn", help="Existing ECS task role ARN for the agent")
+    parser.add_argument("--skip-build", action="store_true", help="Skip docker build")
+    parser.add_argument("--skip-push", action="store_true", help="Skip docker push")
+    ecr_group = parser.add_mutually_exclusive_group()
+    ecr_group.add_argument("--ecr-login", dest="ecr_login", action="store_true", help="Force ECR docker login before push")
+    ecr_group.add_argument("--no-ecr-login", dest="ecr_login", action="store_false", help="Skip automatic ECR docker login")
+    parser.set_defaults(ecr_login=None)
+    parser.add_argument("--dry-run", action="store_true", help="Print commands without running them")
+    parser.add_argument("--show-commands", action="store_true", help="Print generated ECS JSON and AWS commands")
+    parser.add_argument("--wait", action="store_true", help="Wait for the ECS service to become stable")
+    parser.add_argument(
+        "--command",
+        dest="agent_container_command",
+        nargs=argparse.REMAINDER,
+        default=[],
+        help="Container command for the agent task",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Deploy Boxyard containers to AWS.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -735,6 +1052,16 @@ def build_parser() -> argparse.ArgumentParser:
     ship_parser.set_defaults(ecr_login=None)
     add_container_run_options(ship_parser)
 
+    ecs_parser = subparsers.add_parser("ecs", help="Deploy Docker images to ECS")
+    ecs_subparsers = ecs_parser.add_subparsers(dest="ecs_command", required=True)
+
+    agent_parser = ecs_subparsers.add_parser("agent", help="Deploy containerized agents")
+    agent_subparsers = agent_parser.add_subparsers(dest="agent_command", required=True)
+
+    agent_ship_parser = agent_subparsers.add_parser("ship", help="Build, push, and deploy an agent to ECS Fargate")
+    add_common_aws_options(agent_ship_parser)
+    add_ecs_agent_ship_options(agent_ship_parser)
+
     return parser
 
 
@@ -744,6 +1071,8 @@ def main() -> None:
 
     if getattr(args, "container_command", None) and args.container_command[:1] == ["--"]:
         args.container_command = args.container_command[1:]
+    if getattr(args, "agent_container_command", None) and args.agent_container_command[:1] == ["--"]:
+        args.agent_container_command = args.agent_container_command[1:]
 
     if args.command == "auth":
         if args.auth_command == "status":
@@ -763,6 +1092,14 @@ def main() -> None:
             ship_ec2(args)
         else:
             parser.error(f"Unknown ec2 command: {args.ec2_command}")
+    elif args.command == "ecs":
+        if args.ecs_command == "agent":
+            if args.agent_command == "ship":
+                ship_ecs_agent(args)
+            else:
+                parser.error(f"Unknown ECS agent command: {args.agent_command}")
+        else:
+            parser.error(f"Unknown ECS command: {args.ecs_command}")
     else:
         parser.error(f"Unknown command: {args.command}")
 
